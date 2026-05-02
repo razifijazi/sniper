@@ -504,6 +504,60 @@ def action_list_accounts(ctx):
     else:
         safe_print(str(data)[:1000])
 
+def action_set_acl(ctx, username):
+    """Set full ACL for a reseller user"""
+    scheme, host, port, canonical, session_base, token, timeout = ctx
+    
+    log("API", f"Setting full ACL for reseller: {username}")
+    
+    # Use individual ACL flags (acllist-all=all doesn't work on many versions)
+    acl_params = {
+        "reseller": username,
+        "acl-all": 1,
+        "acl-create-acct": 1,
+        "acl-kill-acct": 1,
+        "acl-list-accts": 1,
+        "acl-edit-acct": 1,
+        "acl-modify-acct": 1,
+        "acl-suspend-acct": 1,
+        "acl-unsuspend-acct": 1,
+        "acl-upgrade-account": 1,
+        "acl-create-dns": 1,
+        "acl-edit-dns": 1,
+        "acl-kill-dns": 1,
+        "acl-add-pkg": 1,
+        "acl-passwd": 1,
+        "acl-quota": 1,
+        "acl-stats": 1,
+        "acl-reseller-center": 1,
+        "acl-allow-unlimited-bandwidth": 1,
+        "acl-allow-unlimited-disk-usage": 1
+    }
+    
+    s, data = whm_api(*ctx[:6], "setacls", acl_params, timeout)
+    
+    if s == 200 and isinstance(data, dict):
+        if data.get("metadata", {}).get("result") == 1:
+            log("OK", f"Full ACL granted for {username}")
+            safe_print(f"  {C.GREEN}✓ Reseller {username} now has full WHM access{C.RESET}")
+            
+            # Also set unlimited limits
+            log("STEP", "Setting unlimited limits...")
+            s2, data2 = whm_api(*ctx[:6], "setresellerlimits", {"reseller": username, "no_limit": 1}, timeout)
+            if s2 == 200 and isinstance(data2, dict) and data2.get("metadata", {}).get("result") == 1:
+                log("OK", f"Unlimited limits set for {username}")
+                safe_print(f"  {C.GREEN}✓ Unlimited limits enabled{C.RESET}")
+            else:
+                log("WARN", f"Could not set unlimited limits: {data2}")
+        else:
+            log("ERR", f"Failed to set ACL: {data.get('metadata', {}).get('reason', 'Unknown error')}")
+            safe_print(f"  {C.RED}✗ {data.get('metadata', {}).get('reason', 'Unknown error')}{C.RESET}")
+    else:
+        log("ERR", f"API call failed: HTTP {s}")
+        safe_print(f"  {C.RED}✗ API error{C.RESET}")
+    
+    safe_print(json.dumps(data, indent=2)[:800] if isinstance(data, dict) else str(data)[:800])
+
 def action_change_passwd(ctx, new_password):
     """Change root password"""
     log("API", f"Changing root password → {new_password}")
@@ -1121,6 +1175,7 @@ def whm_shell(ctx):
     accounts                          List all cPanel accounts
     adduser <u> <d> <p> [--reseller]  Create cPanel account (option with reseller)
     deluser <username>                Remove cPanel account
+    acl <username>                    Set full ACL for reseller (fix WHM menu)
     addadmin <u> <p>                  Create backdoor admin
 
   {C.CYAN}Package Management:{C.RESET}
@@ -1160,6 +1215,12 @@ def whm_shell(ctx):
 
             elif cmd == "accounts":
                 action_list_accounts(ctx)
+
+            elif cmd == "acl":
+                if not arg:
+                    print("  Usage: acl <username>")
+                    continue
+                action_set_acl(ctx, arg)
 
             elif cmd == "cat":
                 if not arg:
