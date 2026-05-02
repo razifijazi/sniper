@@ -563,45 +563,13 @@ def _apply_acl(ctx, username):
     safe_print(json.dumps(data, indent=2)[:800] if isinstance(data, dict) else str(data)[:800])
     return False
 
-def action_set_acl(ctx):
-    """Interactive ACL setup - list resellers and let user select"""
-    scheme, host, port, canonical, session_base, token, timeout = ctx
+def action_set_acl(ctx, username):
+    """Set full ACL for a specific reseller user"""
+    if not username:
+        safe_print(f"  {C.YELLOW}Usage: acl <username>{C.RESET}")
+        return
     
-    log("API", "Listing all resellers...")
-    s, data = whm_api(*ctx[:6], "listresellers", {}, timeout)
-    
-    if s == 200 and isinstance(data, dict):
-        resellers = data.get("data", {}).get("reseller", [])
-        
-        if not resellers or len(resellers) == 0:
-            log("WARN", "No resellers found on this server")
-            safe_print(f"  {C.YELLOW}⚠ No resellers found{C.RESET}")
-            return
-        
-        safe_print(f"\n  {C.CYAN}{'NO':<4} {'RESELLER':<20} DOMAIN{C.RESET}")
-        safe_print(f"  {'-' * 50}")
-        
-        reseller_map = {}
-        for i, reseller in enumerate(resellers, 1):
-            reseller_map[i] = reseller
-            safe_print(f"  {C.GREEN}{i:<4} {C.RESET}{reseller:<20} ")
-        
-        safe_print(f"\n  {C.CYAN}Pilih reseller untuk set ACL (1-{len(resellers)}): {C.RESET}", end="")
-        
-        try:
-            choice = input().strip()
-            choice_num = int(choice)
-            
-            if choice_num in reseller_map:
-                selected = reseller_map[choice_num]
-                _apply_acl(ctx, selected)
-            else:
-                safe_print(f"  {C.RED}✗ Pilihan tidak valid{C.RESET}")
-        except (ValueError, EOFError):
-            safe_print(f"  {C.RED}✗ Input tidak valid{C.RESET}")
-    else:
-        log("ERR", f"Failed to list resellers: HTTP {s}")
-        safe_print(str(data)[:1000])
+    _apply_acl(ctx, username)
 
 def action_change_passwd(ctx, new_password):
     """Change root password"""
@@ -1224,7 +1192,7 @@ def whm_shell(ctx):
     accounts                          List all cPanel accounts
     adduser <u> <d> <p> [--reseller]  Create cPanel account (option with reseller)
     deluser <username>                Remove cPanel account
-    acl                               Set full ACL for reseller (interactive)
+    acl <username>                    Set full ACL for reseller
     addadmin <u> <p>                  Create backdoor admin
 
   {C.CYAN}Package Management:{C.RESET}
@@ -1266,7 +1234,10 @@ def whm_shell(ctx):
                 action_list_accounts(ctx)
 
             elif cmd == "acl":
-                action_set_acl(ctx)
+                if not arg:
+                    print("  Usage: acl <username>")
+                    continue
+                action_set_acl(ctx, arg)
 
             elif cmd == "cat":
                 if not arg:
