@@ -579,6 +579,23 @@ def action_change_passwd(ctx, new_password):
     safe_print(json.dumps(data, indent=2)[:800] if isinstance(data, dict)
                else str(data)[:800])
 
+def action_change_user_passwd(ctx, username, new_password):
+    """Change cPanel user password"""
+    log("API", f"Changing password for user: {username}")
+    s, data = whm_api(*ctx[:6], "passwd",
+                      {"user": username, "password": new_password}, ctx[6], ctx[-1])
+    if isinstance(data, dict):
+        metadata = data.get("metadata", {})
+        if metadata.get("result") == 1:
+            log("OK", f"Password changed successfully for {username}")
+            safe_print(f"  {C.GREEN}✓ Password updated{C.RESET}")
+        else:
+            log("ERR", f"Failed to change password: {metadata.get('reason', 'Unknown error')}")
+        safe_print(json.dumps(data, indent=2)[:800])
+    else:
+        log("ERR", f"Failed: {s}")
+        safe_print(str(data)[:800])
+
 def action_exec_cmd(ctx, cmd):
     """Execute OS command via WHM exec API"""
     log("API", f"Executing command: {cmd}")
@@ -1148,6 +1165,8 @@ def whm_shell(ctx):
       listpackages                      → list all available packages
       createpackage <name>              → create package with full privileges
       passwd <newpass>                  → change root password
+      passwd <user> <newpass>           → change user password
+      acl <username>                    → set full ACL for reseller user
       help                              → show commands
       exit / quit                       → exit shell
     """
@@ -1321,10 +1340,19 @@ def whm_shell(ctx):
                 action_create_package(ctx, arg)
 
             elif cmd == "passwd":
-                if not arg:
-                    print("  Usage: passwd <newpassword>")
+                parts = arg.split(None, 1) if arg else []
+                if not parts or len(parts) < 1:
+                    print("  Usage: passwd <newpassword>              → change root password")
+                    print("         passwd <username> <newpassword>   → change user password")
                     continue
-                action_change_passwd(ctx, arg)
+                
+                if len(parts) == 1:
+                    # Change root password
+                    action_change_passwd(ctx, parts[0])
+                else:
+                    # Change user password
+                    username, new_password = parts[0], parts[1]
+                    action_change_user_passwd(ctx, username, new_password)
 
             elif cmd == "api":
                 # Raw API call: api endpoint [key=value ...]
