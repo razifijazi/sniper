@@ -575,7 +575,7 @@ def action_change_passwd(ctx, new_password):
     """Change root password"""
     log("API", f"Changing root password → {new_password}")
     s, data = whm_api(*ctx[:6], "passwd",
-                      {"user": "root", "password": new_password}, ctx[6], ctx[-1])
+                      {"user": "root", "password": new_password}, ctx[-1])
     safe_print(json.dumps(data, indent=2)[:800] if isinstance(data, dict)
                else str(data)[:800])
 
@@ -583,7 +583,7 @@ def action_change_user_passwd(ctx, username, new_password):
     """Change cPanel user password"""
     log("API", f"Changing password for user: {username}")
     s, data = whm_api(*ctx[:6], "passwd",
-                      {"user": username, "password": new_password}, ctx[6], ctx[-1])
+                      {"user": username, "password": new_password}, ctx[-1])
     if isinstance(data, dict):
         metadata = data.get("metadata", {})
         if metadata.get("result") == 1:
